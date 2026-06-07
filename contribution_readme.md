@@ -9,7 +9,8 @@
 
 ## Why I Chose This Issue
 
-[1-2 paragraphs explaining why this issue interests you, how it matches your skills/learning goals, what you hope to learn]
+Since uv is one of the most wiedely adopted Python tooling projexts right now, so contributing here means working in a fast-moving, high standar codebase that thousands of developers depend on daily. I picked this issue because the scope is well-bounded and a core maintainer has already stated the intended fix direction in the thread, which lets me focus on learning the codebase rather than guessing at design. It also sits in the error-handling and filesystem layer, which is a clean entry point into a large project without needing to understand the resolver or type system first.
+My background is mostly in JavaScript, SQL, TypeScript, and Python, so this is a deliberate stretch into Rust. My goal is to learn how a production Rust CLI structures error handling, how it distinguishes fatal from non-fatal conditions, and how its testing harness works, while shipping a real, user-facing improvement. The fact that the bug currently blocks unrelated commands (like shell autocompletion) makes the impact concrete and motivating.
 
 ---
 
@@ -17,11 +18,14 @@
 
 ### Problem Description
 
-[In your own words, what's broken or missing?]
+When uv resolves a configuration file, it expects pyproject.toml to be a regular file. If a directory named pyproject.toml exists in the current working directory or a parent directory, uv fails to read it and aborts with a low-level OS error. This blocks essentially every uv command, even ones that do not need the config file at all.
 
 ### Expected Behavior
 
-[What should happen?]
+The maintainers have specified the intended behavior in the issue thread:
+
+If a pyproject.toml directory is found in the current working directory, uv should error with a clear, explanatory message (not a raw OS error).
+If it is found in a parent directory, erroring is too aggressive; uv should treat it as non-fatal and continue (for example, autocompletion should ignore it since it does not need the config).
 
 ### Current Behavior
 
@@ -29,7 +33,15 @@
 
 ### Affected Components
 
-[Which parts of the codebase are involved?]
+uv aborts on any command with:
+error: failed to read from file `/pyproject.toml`: Is a directory (os error 21)
+Adding -v does not surface any additional helpful context. Because the failure is fatal, downstream actions such as autocompletion cannot run.
+Affected Components
+
+The configuration-file discovery/loading logic (the code that searches the working directory and parent directories for pyproject.toml / uv.toml).
+The error types and messaging for config reads.
+Likely the settings/workspace resolution path that calls into config loading.
+[Confirm exact crates/modules after cloning — note them here, e.g. crates/uv-settings, crates/uv-workspace.]
 
 ---
 
