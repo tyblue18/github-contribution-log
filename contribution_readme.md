@@ -1,4 +1,4 @@
-# Contribution [#]: [Issue Title]
+# Contribution [#1]: uv errors if the `pyproject.toml` is a directory
 
 **Contribution Number:** 1  
 **Student:** [Tanishq Somani
