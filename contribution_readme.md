@@ -29,8 +29,10 @@ If it is found in a parent directory, erroring is too aggressive; uv should trea
 
 ### Current Behavior
 
-[What actually happens?]
-
+Any uv command ran with a directory named pyproject.toml (or uv.toml) anywhere between the current directory and the filesystem root crashed with a raw OS error:
+```
+error: failed to read from file `/pyproject.toml`: Is a directory (os error 21)
+```
 ### Affected Components
 
 uv aborts on any command with:
@@ -49,23 +51,152 @@ Likely the settings/workspace resolution path that calls into config loading.
 
 ### Environment Setup
 
-[Notes on setting up your local development environment - challenges you faced, how you solved them]
+My machine is Windows, but the issue was reported on Linux (Pop!_OS) and the error is a Linux OS error (os error 21), so I set up a Linux development environment using WSL2 to match the reporter's conditions. Challenges I hit and how I solved them:
+
+-Rust installer failed in PowerShell. The standard rustup command (curl ... | sh) is a Linux/macOS shell script; PowerShell has no sh. Fix: installed WSL2 instead of using native Windows Rust, since the bug is Linux-flavored.
+-wsl --install didn't install a distribution. After rebooting, wsl reported "no installed distributions." Fix: explicitly installed Ubuntu with wsl --install -d Ubuntu, then created my UNIX user.
+-Ran Linux commands in PowerShell by mistake. Commands like sudo apt update && ... failed with The token '&&' is not a valid statement separator. Fix: learned to enter the Ubuntu shell first with wsl — the prompt changes from PS C:\...> to user@machine:~$.
+-npm install -g permission error (EACCES) when installing tooling. Ubuntu's apt-packaged npm tries to write to system directories. Fix: installed Node via nvm (Node Version Manager), which keeps global packages in the home directory — no sudo needed.
+-Git identity not set inside WSL. First commit failed with "Author identity unknown" — I had configured git in a different (Windows) terminal, but WSL is a separate environment. Fix: ran git config --global user.name/user.email inside WSL, using the email linked to my GitHub account.
+-GitHub password authentication rejected on push. GitHub no longer accepts account passwords for git operations. Fix: installed GitHub CLI (sudo apt install gh), ran gh auth login with browser-based authentication.
+-Build tooling: installed build-essential, ripgrep (code search), cargo-insta (snapshot test management). First cargo build of uv took ~10–15 minutes (large Rust workspace) — subsequent builds are incremental and fast. I kept the repository in the Linux filesystem (~/uv) rather than /mnt/c/... because builds on the Windows-mounted filesystem are dramatically slower.
 
 ### Steps to Reproduce
 
-1. [Step 1]
-2. [Step 2]
-3. [Observed result]
-
-### Reproduction Evidence
-
-- **Commit showing reproduction:** [Link to commit in your fork]
-- **Screenshots/logs:** [If applicable]
-- **My findings:** [What you discovered during reproduction]
 
 ---
 
-## Solution Approach
+**1. Clone and build `uv` from source**
+
+```bash
+git clone https://github.com/<your-username>/uv.git
+cd uv
+cargo build
+```
+
+**2. Create the trap — a directory named `pyproject.toml` with a project beneath it**
+
+```bash
+mkdir -p /tmp/repro/pyproject.toml
+mkdir -p /tmp/repro/myproject
+cd /tmp/repro/myproject
+```
+
+**3. Run any `uv` project command from the subdirectory**
+
+```bash
+~/uv/target/debug/uv init --name demo .
+~/uv/target/debug/uv lock
+```
+
+**Observed (bug):** Both commands fail immediately with:
+```
+error: failed to read from file `/tmp/repro/pyproject.toml`: Is a directory (os error 21)
+```
+
+**Expected:** `uv` should ignore a directory named `pyproject.toml` in a parent directory and continue normally.
+
+---
+
+**4. Second scenario — directory is the current working directory itself**
+
+```bash
+mkdir -p /tmp/repro2/pyproject.toml
+cd /tmp/repro2
+~/uv/target/debug/uv lock
+```
+
+**Observed:** Same raw OS error.
+
+**Expected (per maintainer):** Still an error, but a clear diagnostic explaining that `pyproject.toml` is a directory rather than a file.
+
+### Reproduction Evidence
+**Bug summary:** A directory (not a file) named `pyproject.toml` anywhere between the current directory and the filesystem root crashes every `uv` command. `uv`'s discovery walks parent directories and tries to read it as a file.
+
+---
+
+**5. Confirmed reproducible** across multiple runs and commands (`uv lock`, `uv init`) on current `main` (`uv 0.11.x`), verifying the issue originally reported in `uv 0.7.20` persists.
+
+branch link: https://github.com/tyblue18/uv
+---
+
+### Solution Approach 
+---
+
+**Understand**
+
+`uv` discovers project/configuration files by checking the current directory for `pyproject.toml`, then each parent directory up to `/`. The discovery code assumes anything named `pyproject.toml` is a readable file; a directory with that name causes a raw filesystem error that aborts every command.
+
+The maintainer (`zanieb`) specified the desired behavior in the issue thread:
+1. A directory-`pyproject.toml` in a **parent directory** should be silently skipped (non-fatal).
+2. In the **current working directory** it should still error, but with a clear explanation instead of `os error 21`.
+
+---
+
+**Match**
+
+The codebase already contains the correct pattern: workspace discovery in `crates/uv-workspace/src/workspace.rs` uses `.ancestors().find(|p| p.join("pyproject.toml").is_file())` — `is_file()` returns `false` for directories, so that walk never crashes.
+
+The crash comes from a different walk: settings discovery in `crates/uv-settings/src/lib.rs` (`FilesystemOptions::from_directory`), which reads the file directly and only special-cases the `NotFound` error. This was confirmed with a discriminating test: a valid `pyproject.toml` file in cwd + a directory-`pyproject.toml` in a parent still crashed — workspace discovery would have stopped at the valid file, so the crash had to be settings, which walks independently and runs first during CLI config resolution.
+
+For the error-message half, the pattern to match is the `WorkspaceErrorKind` enum (`thiserror`-based, paths rendered with `simplified_display()`).
+
+---
+
+**Plan**
+
+**`crates/uv-settings/src/lib.rs`** — add one match arm in `from_directory`'s `pyproject.toml` read:
+```rust
+Err(_) if path.is_dir() => {}
+```
+Treats a directory like a missing file (skip, continue the walk). This alone fixes the crash and delivers behavior (1). Using `path.is_dir()` rather than matching `ErrorKind::IsADirectory` because that error kind is platform-inconsistent and unused elsewhere in the repo.
+
+**`crates/uv-workspace/src/workspace.rs`** — deliver behavior (2):
+- A new error variant `PyprojectTomlIsDirectory(PathBuf)` styled like its neighbors.
+- A small private helper `check_pyproject_is_not_directory(path)` called at the top of the three discovery entry points (`Workspace::discover`, `ProjectWorkspace::discover`, `VirtualProject::discover`).
+
+The guard runs on the starting path **before** the ancestor walk, because the walk's `is_file()` filter silently discards the directory and would otherwise produce a misleading "No `pyproject.toml` found" message. Guarding all three entry points keeps the error consistent across commands (`uv init`, `uv lock`, `uv run`, `uv sync`). A helper is used because the three functions don't share a common pre-walk code path.
+
+**Deliberately out of scope:**
+- The identical bug pattern for a directory named `uv.toml` (same function) — flagged in the PR as a possible follow-up to keep the change minimal.
+- `uv init`'s pre-existing "already initialized" check, which is a different, non-crashing code path.
+
+**Files touched:** `crates/uv-settings/src/lib.rs` (+2 lines), `crates/uv-workspace/src/workspace.rs` (~+18 lines), `crates/uv/tests/it/lock.rs` (new tests).
+
+---
+
+**Implement**
+
+See linked branch (same as Reproduction Evidence).
+
+---
+
+**Review**
+
+Per `CONTRIBUTING.md`: `cargo fmt --all`, `cargo clippy` with warnings as errors, tests via the standard harness.
+
+Self-review checklist:
+- Minimal additive diff only — no refactoring or drive-by changes.
+- Error message wording/format copied from neighboring `WorkspaceErrorKind` variants.
+- Helper function placed at the bottom of the file where other free functions live.
+- Test doc comments link the issue using the file's existing `/// See: <url>` convention.
+- PR description quotes the maintainer's comment as the design rationale and includes before/after output and `Closes #14584`.
+
+---
+
+**Evaluate**
+
+Two integration snapshot tests (`insta` framework) in `crates/uv/tests/it/lock.rs`:
+- Directory-`pyproject.toml` in a parent of a valid project → `uv lock` succeeds.
+- Directory-`pyproject.toml` in cwd → fails with the new clear error.
+
+Snapshots use the harness's path filters (`[TEMP_DIR]`) so they're machine, and OS-independent.
+
+Additional verification:
+- **Mutation check:** temporarily disable the fix, confirm the test fails, restore and confirm green.
+- **Manual repro** of both scenarios with the freshly built binary, plus a symlink sanity check (`pyproject.toml` symlinked to a real file must keep working, since `is_file()`/`is_dir()` follow symlinks).
+- **Regression slice:** existing workspace-discovery integration tests (~40) and unit tests on the touched crates.
+- **Quality gates:** `cargo fmt --all --check` and `cargo clippy -p uv-workspace -p uv-settings --all-targets -- -D warnings`, both clean.
 
 ### Analysis
 
