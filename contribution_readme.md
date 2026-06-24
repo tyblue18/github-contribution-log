@@ -198,84 +198,90 @@ Additional verification:
 - **Regression slice:** existing workspace-discovery integration tests (~40) and unit tests on the touched crates.
 - **Quality gates:** `cargo fmt --all --check` and `cargo clippy -p uv-workspace -p uv-settings --all-targets -- -D warnings`, both clean.
 
-### Analysis
-
-[Your analysis of the root cause - what's causing the issue?]
-
-### Proposed Solution
-
-[High-level description of your fix approach]
-
-### Implementation Plan
-
-Using UMPIRE framework (adapted):
-
-**Understand:** [Restate the problem]
-
-**Match:** [What similar patterns/solutions exist in the codebase?]
-
-**Plan:** [Step-by-step implementation plan]
-1. [Modify file X to do Y]
-2. [Add function Z]
-3. [Update tests]
-
-**Implement:** [Link to your branch/commits as you work]
-
-**Review:** [Self-review checklist - does it follow the project's contribution guidelines?]
-
-**Evaluate:** [How will you verify it works?]
-
----
 
 ## Testing Strategy
 
 ### Unit Tests
 
-- [ ] Test case 1: [Description]
-- [ ] Test case 2: [Description]
-- [ ] Test case 3: [Description]
+uv's discovery logic is primarily covered by integration tests rather than crate-level unit tests, so no new unit tests were added. The existing unit tests on the two modified crates (`uv-settings`, `uv-workspace`) were run to confirm no regressions:
+
+- **Test case 1:** Existing `uv-workspace` library unit tests — confirm the discovery functions and error types still compile and behave correctly after adding the new `PyprojectTomlIsDirectory` variant and the `check_pyproject_is_not_directory` helper. All pass.
+- **Test case 2:** Existing `uv-settings` library unit tests — confirm config resolution still works after adding the new directory-skip match arm in `FilesystemOptions::from_directory`. All pass.
+- **Test case 3:** Existing ~40 workspace-discovery integration tests (the suite that exercises the exact `discover` functions I modified) — run as a regression slice to confirm normal project/workspace discovery is unaffected. All pass.
 
 ### Integration Tests
 
-- [ ] Integration scenario 1
-- [ ] Integration scenario 2
+Two new snapshot-based integration tests were added in `crates/uv/tests/it/lock.rs` (uv uses the `insta` framework: each test runs a real uv command in a sandboxed temp directory and asserts the exact output against a recorded snapshot, with machine-specific values like temp paths normalized to placeholders such as `[TEMP_DIR]` so the tests are OS-independent).
+
+- **Integration scenario 1 — `lock_pyproject_toml_directory_in_parent`:** Creates a *directory* named `pyproject.toml` in a parent directory, plus a valid project in a subdirectory, then runs `uv lock` from the subdirectory. Asserts **success** (exit code 0, normal lock output) — i.e. the directory in the parent is silently skipped. Verifies behavior #1 (non-fatal).
+- **Integration scenario 2 — `lock_pyproject_toml_directory_in_cwd`:** Creates a *directory* named `pyproject.toml` in the current directory and runs `uv lock`. Asserts **failure** (exit code 2) with the new clear error: `error: ` `pyproject.toml` ` at [TEMP_DIR]/pyproject.toml is a directory, expected a file`. Verifies behavior #2 (clear error).
 
 ### Manual Testing
 
-[What you tested manually and results]
+Built the binary and verified each scenario by hand against the original bug:
+
+- Parent directory-`pyproject.toml` + valid project in a subdirectory → `Resolved 1 package in 51ms` (succeeds; **previously crashed** with os error 21).
+- Parent directory-`pyproject.toml` with no project anywhere → normal `No pyproject.toml found in current directory or any parent directory` (graceful; **previously crashed**).
+- Current-directory directory-`pyproject.toml` → the new clear error message (**previously** the raw os error 21).
+- **Symlink sanity check:** a `pyproject.toml` symlink pointing at a real TOML file → still locks correctly (confirms `is_file()`/`is_dir()` follow symlinks and the fix doesn't break valid setups).
+- **Mutation check (proving the tests have teeth):** temporarily disabled the fix (stubbed an early `return Ok(())` into the helper) and re-ran the tests — the cwd test failed with exactly the misleading "not found" output the fix prevents, while the parent test still passed (protected by the independent settings fix). Restoring the fix returned everything to green.
+
+**Quality gates:** `cargo fmt --all --check` and `cargo clippy -p uv-workspace -p uv-settings --all-targets -- -D warnings` both clean. All CI checks (Linux, macOS, Windows) passed on the submitted PR.
 
 ---
 
 ## Implementation Notes
 
-### Week [X] Progress
+### Week 1 Progress
 
-[What you built this week, challenges faced, decisions made]
+Completed the full contribution end-to-end in the first week (the program encourages working ahead).
 
-### Week [Y] Progress
+- **Environment setup:** Set up a WSL2 Ubuntu environment on Windows to match the issue's Linux conditions, working through a chain of toolchain issues (PowerShell vs. shell scripts, WSL distro install, npm permissions → nvm, git identity inside WSL, GitHub CLI auth). All documented under Environment Setup above.
+- **Reproduction:** Reproduced the crash consistently on current `main` (uv 0.11.x), confirming the originally reported bug (uv 0.7.20) still exists.
+- **Root-cause investigation (key decision point):** My first assumption was that the bug lived in workspace discovery, but that code already used `is_file()` and handled directories correctly. I designed a *discriminating test* — a valid `pyproject.toml` file in the cwd plus a directory-`pyproject.toml` in a parent — and it still crashed, which proved the crash was in a different, earlier layer: **settings discovery** (`FilesystemOptions::from_directory`), which runs first during CLI config resolution. That explained why *every* command crashed, even ones that don't need a project.
+- **Implementation:** Two changes — a directory-skip match arm in settings (fixes the crash, makes the parent case non-fatal) and a new clear error message in workspace discovery for the cwd case, applied via a shared helper across all three discovery entry points for consistency.
+- **Testing & submission:** Added the two integration tests, ran the mutation check, verified manually, passed the quality gates, and opened the PR. All CI passed; a reviewer self-requested within 24 hours.
 
-[Continue documenting as you work]
+### Week 2 Progress
+
+_Awaiting maintainer review. Will document any requested changes and how I addressed them here._
 
 ### Code Changes
 
-- **Files modified:** [List]
-- **Key commits:** [Links to important commits]
-- **Approach decisions:** [Why you chose certain approaches]
+- **Files modified:**
+  - `crates/uv-settings/src/lib.rs` (+2 lines) — directory-skip match arm in `FilesystemOptions::from_directory`.
+  - `crates/uv-workspace/src/workspace.rs` (+18 lines) — new `PyprojectTomlIsDirectory` error variant, the `check_pyproject_is_not_directory` helper, and three call sites in `Workspace::discover`, `ProjectWorkspace::discover`, and `VirtualProject::discover`.
+  - `crates/uv/tests/it/lock.rs` (+61 lines) — two integration tests.
+  - Total: 3 files, +81 / −0 (pure additions, no deletions, nothing touched outside the fix and its tests).
+- **Key commits:** [`d99dc92`](https://github.com/astral-sh/uv/pull/19762/commits/d99dc9282b6d2cb074946dac86949f2cd98c2d98) — Ignore directories named pyproject.toml during settings and workspace discovery
+- **Approach decisions:**
+  - Used `path.is_dir()` rather than matching `ErrorKind::IsADirectory`, because that error kind is platform-inconsistent (Windows reports directory-read failures differently) and unused elsewhere in the repo.
+  - Put the guard *before* the ancestor walk, because the walk's `is_file()` filter silently discards the directory — by the time it runs, the information needed for a clear error is gone.
+  - Applied the guard to all three discovery entry points via a shared helper (rather than just the path the repro hit), so the error is consistent across `uv lock`, `uv init`, `uv run`, `uv sync`, etc.
+  - Deliberately scoped out the identical bug for a directory named `uv.toml` (same function) to keep the PR minimal, flagging it as a possible follow-up.
 
 ---
 
 ## Pull Request
 
-**PR Link:** [GitHub PR URL when submitted]
+**PR Link:** https://github.com/astral-sh/uv/pull/19762
 
-**PR Description:** [Draft or final PR description - much of the content above can be adapted]
+**PR Description (final, as submitted):**
+
+> **Summary** — A directory named `pyproject.toml` anywhere on the path from the current directory up to `/` caused every uv command to crash with `error: failed to read from file ...: Is a directory (os error 21)`. Per @zanieb's spec on the issue, the fix makes two cases work: a directory-`pyproject.toml` in a **parent** directory is silently skipped (non-fatal), and one in the **current directory** produces a clear error instead of a raw OS error.
+>
+> **Root cause** — The crash was in settings discovery (`FilesystemOptions::from_directory` in `uv-settings`), which only special-cased `NotFound`; workspace discovery already used `is_file()`. Settings discovery runs before everything else, so every command crashed.
+>
+> **The two changes** — `uv-settings`: a match arm that skips the path when it's a directory. `uv-workspace`: a new `PyprojectTomlIsDirectory` error plus a shared helper called at the top of all three discover functions, so the cwd case errors clearly and consistently.
+>
+> Includes before/after output, two integration tests, and `Closes #14584`.
 
 **Maintainer Feedback:**
-- [Date]: [Summary of feedback received]
-- [Date]: [How you addressed it]
 
-**Status:** [Awaiting review / Iterating / Approved / Merged]
+- _<date>_: Reviewer EliteTK self-requested a review within 24 hours of submission. Awaiting feedback.
+- _<date>_: _How I addressed it — to be filled in._
 
+**Status:** Awaiting review (all CI checks passing; reviewer self-requested)
 ---
 
 ## Learnings & Reflections
