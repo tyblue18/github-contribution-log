@@ -9,7 +9,9 @@
 
 ## Why I Chose This Issue
 
-[1-2 paragraphs explaining why this issue interests you, how it matches your skills/learning goals, what you hope to learn]
+I picked this issue because the problem is concrete and the impact is easy to measure. uv makes up about 64% of Hatch's downloaded wheel size, but a lot of users either already have uv installed or don't need it at all, especially in CI pipelines and containers where the environment gets thrown away after one job. I've run into this myself deploying my own projects through CI, where install times and image sizes actually matter. Fixing something that saves resources for thousands of downstream users without breaking anything for people who want uv's speed felt like a contribution worth making.
+
+It also fits where I am as a developer. The issue is well scoped since the original author already pointed out the internal environments that hardcode uv as the installer, it's tagged as a `good first issue`, and it touches Python packaging internals like optional dependencies and how a tool bootstraps its own environments. I use this stuff every day but I've never worked on it from the maintainer side. Working through how Hatch structures its internal environment configs and building a clean fallback from uv to virtualenv/pip is a good way to actually understand the packaging ecosystem instead of just using it. And since Hatch is a PyPA project with an open linked PR on this issue ([#2325](https://github.com/pypa/hatch/pull/2325)), I get to see how maintainers think about backwards compatibility and review standards on tooling that real people depend on.
 
 ---
 
