@@ -147,6 +147,7 @@ A `click`-based CLI in `dev/sedona_breeze` that wraps Docker and Docker Compose:
 ### Unit Tests
 
 *Status: not yet implemented. `pytest` is declared but no test module exists in commit `48e8e77b`.*
+Still working on getting proper test implemented, ran into a lot of issues
 
 - [ ] **Test case 1 — matrix validation rejects Spark 4.x on Scala 2.12.** `BreezeCiParams("3.11", "4.0.0", "2.12.8").validate()` raises `click.UsageError` naming both the constraint and the fix.
 - [ ] **Test case 2 — matrix validation rejects Spark 4.x on Python < 3.10.** `("3.9", "4.0.0", "2.13.8")` raises; `("3.10", "4.0.0", "2.13.8")` does not.
