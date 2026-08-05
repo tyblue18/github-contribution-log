@@ -3,7 +3,7 @@
 **Contribution Number:** 2
 **Student:** Tanishq Somani
 **Issue:** [apache/sedona#2993](https://github.com/apache/sedona/issues/2993)
-**Status:** Phase II
+**Status:** Phase III
 
 ---
 
